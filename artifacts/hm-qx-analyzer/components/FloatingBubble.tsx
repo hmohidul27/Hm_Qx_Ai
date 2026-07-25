@@ -37,7 +37,15 @@ function useClock() {
 
 export default function FloatingBubble() {
   const colors = useColors();
-  const { isScanning, setIsScanning, setScanStatus, setSignal, autoScanEnabled } = useApp();
+  const {
+    isScanning,
+    setIsScanning,
+    setScanStatus,
+    setSignal,
+    autoScanEnabled,
+    priceHandlerRef,
+    fireScanTrigger,
+  } = useApp();
   const clock = useClock();
 
   const { startScan } = useCandleSignal({
@@ -47,14 +55,18 @@ export default function FloatingBubble() {
     setSignal,
     autoScanEnabled,
     isAnalyzerVisible: true,
+    priceHandlerRef,
+    fireScanTrigger,
   });
 
-  // Animated position
-  const pan = useRef(new Animated.ValueXY({ x: SCREEN_W - BUBBLE_SIZE - 16, y: 140 })).current;
+  // ── Animated position ────────────────────────────────────────────────────
+  const pan = useRef(
+    new Animated.ValueXY({ x: SCREEN_W - BUBBLE_SIZE - 16, y: 140 })
+  ).current;
   const isDragging = useRef(false);
   const lastPos = useRef({ x: SCREEN_W - BUBBLE_SIZE - 16, y: 140 });
 
-  // Pulse animation while scanning
+  // ── Pulse while scanning ─────────────────────────────────────────────────
   const pulse = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (isScanning) {
@@ -71,6 +83,7 @@ export default function FloatingBubble() {
     }
   }, [isScanning, pulse]);
 
+  // ── Drag ─────────────────────────────────────────────────────────────────
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -81,14 +94,11 @@ export default function FloatingBubble() {
         pan.setValue({ x: 0, y: 0 });
       },
       onPanResponderMove: (_, gs) => {
-        if (Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4) {
-          isDragging.current = true;
-        }
+        if (Math.abs(gs.dx) > 4 || Math.abs(gs.dy) > 4) isDragging.current = true;
         pan.setValue({ x: gs.dx, y: gs.dy });
       },
       onPanResponderRelease: (_, gs) => {
         pan.flattenOffset();
-        // Clamp to screen bounds
         const newX = Math.max(0, Math.min(SCREEN_W - BUBBLE_SIZE, lastPos.current.x + gs.dx));
         const newY = Math.max(80, Math.min(SCREEN_H - BUBBLE_SIZE - 40, lastPos.current.y + gs.dy));
         lastPos.current = { x: newX, y: newY };
@@ -106,7 +116,6 @@ export default function FloatingBubble() {
   }
 
   const borderColor = isScanning ? colors.warning : colors.primary;
-  const glowColor = isScanning ? 'rgba(255,170,0,0.6)' : 'rgba(0,255,255,0.6)';
   const actionText = isScanning ? 'WAIT' : 'SCAN';
   const actionColor = isScanning ? colors.warning : colors.primary;
 
@@ -116,7 +125,7 @@ export default function FloatingBubble() {
         styles.bubble,
         {
           borderColor,
-          shadowColor: glowColor,
+          shadowColor: isScanning ? 'rgba(255,170,0,0.7)' : 'rgba(0,255,255,0.7)',
           transform: [
             { translateX: pan.x },
             { translateY: pan.y },
@@ -148,7 +157,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
+    shadowOpacity: 1,
     shadowRadius: 18,
     elevation: 20,
     zIndex: 9999,
