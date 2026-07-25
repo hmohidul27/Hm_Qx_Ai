@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   TextInput,
@@ -11,13 +11,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
 
-// ─── Price extractor — runs BEFORE page content loads ─────────────────────
-// Hooks WebSocket, XHR, fetch AND DOM to capture prices from any broker page.
-// Sends: { type: 'price', value: number }
-const PRICE_EXTRACTOR_JS = `
+// ─── Injected BEFORE page content loads ───────────────────────────────────
+// Hooks WebSocket so live price ticks are captured from the very first frame.
+const PRELOAD_JS = `
 (function() {
-  if (window.__hmqx) return true;
-  window.__hmqx = true;
+  if (window.__hmqxWS) return true;
+  window.__hmqxWS = true;
 
   function postPrice(p) {
     p = parseFloat(p);
@@ -25,100 +24,37 @@ const PRICE_EXTRACTOR_JS = `
     try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'price',value:p})); } catch(e){}
   }
 
-  function scanJson(obj, depth) {
-    if (!obj || typeof obj !== 'object' || depth > 4) return;
-    var keys = ['price','close','bid','ask','rate','c','last','currentPrice','current_price','close_price','closePrice','p','ltp'];
-    for (var i = 0; i < keys.length; i++) {
-      if (obj[keys[i]] !== undefined) { postPrice(obj[keys[i]]); return; }
-    }
-    var vals = Object.values(obj);
-    for (var j = 0; j < vals.length; j++) scanJson(vals[j], depth + 1);
-  }
-
-  function parseMsg(raw) {
+  function tryExtract(raw) {
     if (!raw || typeof raw !== 'string') return;
-    // Try full JSON parse first
-    try { scanJson(JSON.parse(raw), 0); return; } catch(e) {}
-    // Regex: "price":1.08450  or  "c":"1.08450"
-    var m = raw.match(/"(?:price|close|bid|ask|rate|c|last|ltp|currentPrice|current_price)"\\s*:\\s*"?([0-9]+\\.?[0-9]+)"?/i);
-    if (m) { postPrice(m[1]); return; }
-    // OHLC arrays: [timestamp, open, high, low, close, ...]
-    var a = raw.match(/\\[\\s*[0-9]{9,}\\s*,\\s*[0-9.]+\\s*,\\s*[0-9.]+\\s*,\\s*[0-9.]+\\s*,\\s*([0-9.]+)/);
-    if (a) { postPrice(a[1]); }
-  }
-
-  // ── 1. WebSocket interception (catches broker live feed) ─────────────────
-  var _WS = window.WebSocket;
-  function HookedWS(url, proto) {
-    var ws = proto ? new _WS(url, proto) : new _WS(url);
-    ws.addEventListener('message', function(e) { parseMsg(e.data); });
-    return ws;
-  }
-  HookedWS.prototype = _WS.prototype;
-  HookedWS.CONNECTING = _WS.CONNECTING;
-  HookedWS.OPEN = _WS.OPEN;
-  HookedWS.CLOSING = _WS.CLOSING;
-  HookedWS.CLOSED = _WS.CLOSED;
-  window.WebSocket = HookedWS;
-
-  // ── 2. XHR interception ──────────────────────────────────────────────────
-  var _open = XMLHttpRequest.prototype.open;
-  var _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function() { this.__url = arguments[1]; return _open.apply(this,arguments); };
-  XMLHttpRequest.prototype.send = function() {
-    this.addEventListener('load', function() {
-      try { parseMsg(this.responseText); } catch(e) {}
-    });
-    return _send.apply(this, arguments);
-  };
-
-  // ── 3. fetch() interception ───────────────────────────────────────────────
-  var _fetch = window.fetch;
-  window.fetch = function() {
-    return _fetch.apply(this, arguments).then(function(resp) {
-      var clone = resp.clone();
-      clone.text().then(parseMsg).catch(function(){});
-      return resp;
-    });
-  };
-
-  // ── 4. DOM scanner — finds visible price text ─────────────────────────────
-  function domScan() {
+    // Socket.io wrapped JSON: 42["event",{...}]
+    var sio = raw.match(/^\\d+\\[".+?",({.+})\\]$/);
+    if (sio) { raw = sio[1]; }
     try {
-      // Specific broker selectors first
-      var sels = [
-        '.current-price','[class*="current-price"]','[class*="CurrentPrice"]',
-        '.asset-price','[class*="asset-price"]','[class*="assetPrice"]',
-        '.price-value','[class*="price-value"]','[class*="priceValue"]',
-        '.chart-price','[class*="chart-price"]',
-        '.rate','[class*="rateValue"]',
-        '.js-symbol-last','.tv-symbol-price-quote__value',
-        '[data-field="last_price"]','[data-role="price"]',
-        'span[class*="price"]','div[class*="price"]','p[class*="price"]'
-      ];
-      for (var i = 0; i < sels.length; i++) {
-        var el = document.querySelector(sels[i]);
-        if (el && el.offsetParent !== null) {
-          var txt = el.textContent.replace(/,/g,'.').trim();
-          var m = txt.match(/([0-9]{1,6}\\.[0-9]{2,8})/);
-          if (m) { postPrice(m[1]); return; }
-        }
+      var d = JSON.parse(raw);
+      var keys = ['price','close','bid','ask','c','last','rate','ltp','currentPrice','current_price','close_price'];
+      for (var i=0;i<keys.length;i++){
+        if (d[keys[i]] !== undefined) { postPrice(d[keys[i]]); return; }
       }
-      // Fallback: scan leaf text nodes for price-like numbers
-      var walker = document.createTreeWalker(document.body, 4, null, false);
-      var node;
-      while ((node = walker.nextNode())) {
-        var t = (node.textContent || '').trim();
-        if (t.length >= 5 && t.length <= 12) {
-          var match = t.match(/^([0-9]{1,5}\\.[0-9]{3,8})$/);
-          if (match) { postPrice(match[1]); return; }
-        }
+      // nested: {data:{price:...}}
+      if (d.data) for (var i=0;i<keys.length;i++){
+        if (d.data[keys[i]] !== undefined) { postPrice(d.data[keys[i]]); return; }
       }
     } catch(e) {}
+    // Plain regex fallback
+    var m = raw.match(/"(?:price|close|bid|ask|c|last|rate|ltp)":\\s*"?([0-9]+\\.?[0-9]+)"?/i);
+    if (m) postPrice(m[1]);
   }
 
-  document.addEventListener('DOMContentLoaded', function() { setInterval(domScan, 1200); });
-  setTimeout(function() { setInterval(domScan, 1200); }, 3000);
+  // WebSocket hook
+  var _WS = window.WebSocket;
+  window.WebSocket = function(url, proto) {
+    var ws = proto ? new _WS(url, proto) : new _WS(url);
+    ws.addEventListener('message', function(e) {
+      if (typeof e.data === 'string') tryExtract(e.data);
+    });
+    return ws;
+  };
+  try { window.WebSocket.prototype = _WS.prototype; } catch(e) {}
 
   true;
 })();
@@ -128,7 +64,6 @@ const PRICE_EXTRACTOR_JS = `
 function normalizeUrl(input: string): string {
   const t = input.trim();
   if (!t) return '';
-  if (t.toLowerCase().includes('google.com')) return 'https://www.google.com/webhp?igu=1';
   if (t.toLowerCase().includes('quotex.com') || t.toLowerCase().includes('qxbroker.com'))
     return 'https://market-qx.trade';
   if (/^https?:\/\//i.test(t)) return t;
@@ -144,13 +79,11 @@ const HOME_SITES = [
 // ─────────────────────────────────────────────────────────────────────────
 export default function BrowserView() {
   const colors = useColors();
-  const { setCurrentUrl, setView, reportPrice } = useApp();
-  const webViewRef = useRef<WebView>(null);
+  const { setCurrentUrl, setView, reportPrice, webViewRef } = useApp();
   const [addressText, setAddressText] = useState('');
   const [showWebView, setShowWebView] = useState(false);
   const [webViewUrl, setWebViewUrl] = useState('');
 
-  // All prices from the page flow here continuously
   const handleMessage = useCallback(
     (event: WebViewMessageEvent) => {
       try {
@@ -159,7 +92,7 @@ export default function BrowserView() {
           reportPrice(msg.value);
         }
       } catch {
-        // ignore non-JSON messages from the page
+        // ignore non-JSON messages
       }
     },
     [reportPrice]
@@ -169,7 +102,7 @@ export default function BrowserView() {
     const norm = normalizeUrl(url);
     if (!norm) return;
     setWebViewUrl(norm);
-    setAddressText(norm.includes('webhp') ? 'https://www.google.com' : norm);
+    setAddressText(norm);
     setShowWebView(true);
     setCurrentUrl(norm);
   }
@@ -180,7 +113,7 @@ export default function BrowserView() {
     setAddressText('');
   }
 
-  function reload() { webViewRef.current?.reload(); }
+  function reload() { (webViewRef.current as any)?.reload(); }
   function handleSubmit() { if (addressText.trim()) loadUrl(addressText); }
 
   return (
@@ -221,18 +154,17 @@ export default function BrowserView() {
       <View style={styles.viewport}>
         {showWebView ? (
           <WebView
-            ref={webViewRef}
+            ref={webViewRef as any}
             source={{ uri: webViewUrl }}
             style={styles.webView}
             javaScriptEnabled
             domStorageEnabled
             allowsInlineMediaPlayback
             mediaPlaybackRequiresUserAction={false}
-            // Inject BEFORE page JS runs — catches WebSocket from the very start
-            injectedJavaScriptBeforeContentLoaded={PRICE_EXTRACTOR_JS}
+            injectedJavaScriptBeforeContentLoaded={PRELOAD_JS}
             onMessage={handleMessage}
             onNavigationStateChange={(state) => {
-              if (state.url && !state.url.includes('webhp')) {
+              if (state.url) {
                 setAddressText(state.url);
                 setCurrentUrl(state.url);
               }

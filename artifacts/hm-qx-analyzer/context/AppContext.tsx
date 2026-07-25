@@ -6,6 +6,7 @@ import React, {
   useCallback,
   ReactNode,
 } from 'react';
+import type WebView from 'react-native-webview';
 
 export type AppView = 'dashboard' | 'analyzer';
 
@@ -30,9 +31,11 @@ interface AppContextType {
   setSignal: (s: Signal | null) => void;
   autoScanEnabled: boolean;
   setAutoScanEnabled: (v: boolean) => void;
-  // Price bridge: BrowserView → useCandleSignal
+  // Price bridge
   priceHandlerRef: React.MutableRefObject<((price: number) => void) | null>;
   reportPrice: (price: number) => void;
+  // WebView ref — BrowserView sets this so useCandleSignal can inject JS
+  webViewRef: React.MutableRefObject<WebView | null>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -46,6 +49,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [autoScanEnabled, setAutoScanEnabled] = useState(true);
 
   const priceHandlerRef = useRef<((price: number) => void) | null>(null);
+  const webViewRef = useRef<WebView | null>(null);
+
   const reportPrice = useCallback((price: number) => {
     priceHandlerRef.current?.(price);
   }, []);
@@ -61,6 +66,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         autoScanEnabled, setAutoScanEnabled,
         priceHandlerRef,
         reportPrice,
+        webViewRef,
       }}
     >
       {children}

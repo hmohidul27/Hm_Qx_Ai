@@ -2,6 +2,62 @@ import { useEffect, useRef, useCallback } from 'react';
 import * as Speech from 'expo-speech';
 import { Signal } from '@/context/AppContext';
 
+// ─── DOM price scanner — injected into WebView every 600ms during scan ────
+// Tries many selectors and text patterns specific to Quotex, Binolla, etc.
+const DOM_SCAN_JS = `
+(function() {
+  function post(p) {
+    p = parseFloat(p);
+    if (!isNaN(p) && p > 0 && p < 1000000) {
+      try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'price',value:p})); } catch(e){}
+    }
+  }
+
+  // 1. Targeted selectors (Quotex, Binolla, generic trading)
+  var sels = [
+    '.chart-price', '[class*="chart-price"]',
+    '.current-price', '[class*="current-price"]', '[class*="currentPrice"]',
+    '.asset-price',  '[class*="asset-price"]',  '[class*="assetPrice"]',
+    '.js-price', '.js-rate', '.trade-price',
+    '[class*="price-value"]', '[class*="priceValue"]',
+    '[class*="rate-value"]',  '[class*="rateValue"]',
+    '.value', '.price', '.rate',
+    '[data-field="last_price"]', '[data-role="price"]',
+    '.tv-symbol-price-quote__value',
+    '.deal-price', '[class*="dealPrice"]',
+    '.current__value', '.ticker__price',
+    'span[class*="price"]', 'div[class*="price"]',
+    'span[class*="rate"]',  'div[class*="rate"]'
+  ];
+
+  for (var i = 0; i < sels.length; i++) {
+    var els = document.querySelectorAll(sels[i]);
+    for (var j = 0; j < els.length; j++) {
+      var el = els[j];
+      if (el.offsetParent !== null) {
+        var txt = (el.textContent || '').replace(/,/g, '.').trim();
+        var m = txt.match(/([0-9]{1,7}\\.[0-9]{2,8})/);
+        if (m) { post(m[1]); return; }
+      }
+    }
+  }
+
+  // 2. Fallback: scan all leaf elements for price-shaped numbers
+  var all = document.querySelectorAll('span, div, p, td, li, label');
+  for (var k = 0; k < all.length; k++) {
+    var el = all[k];
+    if (el.children.length === 0 && el.offsetParent !== null) {
+      var t = (el.textContent || '').replace(/,/g, '.').trim();
+      if (t.length >= 4 && t.length <= 14) {
+        var match = t.match(/^([0-9]{1,7}\\.[0-9]{2,8})$/);
+        if (match) { post(match[1]); return; }
+      }
+    }
+  }
+  true;
+})();
+`;
+
 interface Props {
   isScanning: boolean;
   setIsScanning: (v: boolean) => void;
@@ -10,6 +66,7 @@ interface Props {
   autoScanEnabled: boolean;
   isAnalyzerVisible: boolean;
   priceHandlerRef: React.MutableRefObject<((price: number) => void) | null>;
+  webViewRef: React.MutableRefObject<any>;
 }
 
 export function useCandleSignal({
@@ -20,42 +77,40 @@ export function useCandleSignal({
   autoScanEnabled,
   isAnalyzerVisible,
   priceHandlerRef,
+  webViewRef,
 }: Props) {
   const tickDataRef = useRef<number[]>([]);
   const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const domPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoTriggerRef = useRef(false);
   const isScanningRef = useRef(isScanning);
   isScanningRef.current = isScanning;
 
   const generateSignal = useCallback(() => {
-    // Stop collecting prices
     priceHandlerRef.current = null;
+    if (domPollRef.current) { clearInterval(domPollRef.current); domPollRef.current = null; }
 
     const ticks = tickDataRef.current;
 
     if (ticks.length < 2) {
-      setScanStatus('NO PRICE DATA — OPEN A CHART AND TRY AGAIN');
+      setScanStatus('NO PRICE DATA — RELOAD THE PAGE AND TRY AGAIN');
       setIsScanning(false);
-      setTimeout(() => setScanStatus('SYSTEM READY'), 3500);
+      setTimeout(() => setScanStatus('SYSTEM READY'), 4000);
       return;
     }
 
-    // Core logic:
-    // holdPrice = price at scan start (where it was holding)
-    // closePrice = last price when candle closes
-    const holdPrice = ticks[0];
+    const holdPrice  = ticks[0];
     const closePrice = ticks[ticks.length - 1];
-    const priceDiff = closePrice - holdPrice;
-    const isUp = priceDiff >= 0;
+    const priceDiff  = closePrice - holdPrice;
+    const isUp       = priceDiff >= 0;
+    const pipDiff    = Math.abs(priceDiff) * 10000;
 
-    // Strength in pips (4-decimal pairs)
-    const pipDiff = Math.abs(priceDiff) * 10000;
     let strength = Math.min(97, pipDiff * 40);
     if (strength < 44) strength = 44 + Math.random() * 22;
 
     const label = isUp
-      ? pipDiff > 2.5 ? 'STRONG BUY' : 'BUY'
-      : pipDiff > 2.5 ? 'STRONG SELL' : 'SELL';
+      ? (pipDiff > 2.5 ? 'STRONG BUY' : 'BUY')
+      : (pipDiff > 2.5 ? 'STRONG SELL' : 'SELL');
 
     const signal: Signal = {
       direction: isUp ? 'UP' : 'DOWN',
@@ -69,7 +124,6 @@ export function useCandleSignal({
     setScanStatus('AI SIGNAL GENERATED!');
     setIsScanning(false);
 
-    // Voice announcement in Bengali
     const voiceText = isUp
       ? 'আপ সিগনাল! বাই করুন! মার্কেট ঊর্ধ্বমুখী।'
       : 'ডাউন সিগনাল! সেল করুন! মার্কেট নিম্নমুখী।';
@@ -87,20 +141,26 @@ export function useCandleSignal({
 
       tickDataRef.current = [];
       setIsScanning(true);
-      setScanStatus('READING CHART LIVE...');
+      setScanStatus('SCANNING CHART...');
 
       let countdown = durationSeconds;
-      let lastDisplayedPrice = 0;
+      let lastPrice = 0;
 
-      // Register price listener — prices come from the open chart via BrowserView
+      // Register handler — prices from WebSocket interception arrive here
       priceHandlerRef.current = (price: number) => {
         tickDataRef.current.push(price);
-        if (price !== lastDisplayedPrice) {
-          lastDisplayedPrice = price;
-          setScanStatus(`READING CHART: ${countdown}s LEFT | ${price.toFixed(5)}`);
+        if (price !== lastPrice) {
+          lastPrice = price;
+          setScanStatus(`READING: ${countdown}s | ${price.toFixed(5)}`);
         }
       };
 
+      // DOM poll — inject scanner every 600ms regardless of WebSocket
+      domPollRef.current = setInterval(() => {
+        try { webViewRef.current?.injectJavaScript(DOM_SCAN_JS); } catch (_) {}
+      }, 600);
+
+      // Countdown timer
       scanTimerRef.current = setInterval(() => {
         countdown--;
         if (countdown <= 0) {
@@ -110,17 +170,17 @@ export function useCandleSignal({
         }
       }, 1000);
     },
-    [setIsScanning, setScanStatus, priceHandlerRef, generateSignal]
+    [setIsScanning, setScanStatus, priceHandlerRef, webViewRef, generateSignal]
   );
 
-  // Auto-scan: last 10 seconds of every 1-minute candle (second = 50)
+  // Auto-scan: last 10 seconds of every 1-minute candle (fires at second = 50)
   useEffect(() => {
     if (!autoScanEnabled || !isAnalyzerVisible) return;
     const id = setInterval(() => {
       const sec = new Date().getSeconds();
       if (sec === 50 && !isScanningRef.current && !autoTriggerRef.current) {
         autoTriggerRef.current = true;
-        setScanStatus('AUTO: LAST 10s OF CANDLE — READING CHART...');
+        setScanStatus('AUTO: LAST 10s — READING CHART...');
         startScan(9);
       }
       if (sec === 1) autoTriggerRef.current = false;
@@ -132,6 +192,7 @@ export function useCandleSignal({
     return () => {
       priceHandlerRef.current = null;
       if (scanTimerRef.current) clearInterval(scanTimerRef.current);
+      if (domPollRef.current) clearInterval(domPollRef.current);
     };
   }, [priceHandlerRef]);
 

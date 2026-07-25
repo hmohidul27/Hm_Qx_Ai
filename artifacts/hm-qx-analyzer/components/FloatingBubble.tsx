@@ -35,7 +35,7 @@ function useClock() {
 
 export default function FloatingBubble() {
   const colors = useColors();
-  const { isScanning, setIsScanning, setScanStatus, setSignal, autoScanEnabled, priceHandlerRef } = useApp();
+  const { isScanning, setIsScanning, setScanStatus, setSignal, autoScanEnabled, priceHandlerRef, webViewRef } = useApp();
   const clock = useClock();
 
   const { startScan } = useCandleSignal({
@@ -46,6 +46,7 @@ export default function FloatingBubble() {
     autoScanEnabled,
     isAnalyzerVisible: true,
     priceHandlerRef,
+    webViewRef,
   });
 
   const pan = useRef(new Animated.ValueXY({ x: W - SIZE - 16, y: 140 })).current;
@@ -99,7 +100,7 @@ export default function FloatingBubble() {
   }
 
   const borderColor = isScanning ? colors.warning : colors.primary;
-  const textColor = isScanning ? colors.warning : colors.primary;
+  const textColor   = isScanning ? colors.warning : colors.primary;
 
   return (
     <Animated.View
@@ -141,7 +142,7 @@ const styles = StyleSheet.create({
     zIndex: 9999,
   },
   inner: { alignItems: 'center', gap: 2 },
-  top: { fontSize: 8, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase' },
-  action: { fontSize: 17, fontWeight: '900', letterSpacing: 2 },
+  top:   { fontSize: 8,  fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase' },
+  action:{ fontSize: 17, fontWeight: '900', letterSpacing: 2 },
   clock: { fontSize: 9, color: '#ffffff', fontFamily: 'monospace', marginTop: 1 },
 });
