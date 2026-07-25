@@ -6,24 +6,36 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 18
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Build with EAS
-        run: npx eas-cli build --platform android --profile preview --non-interactive --local
-        env:
-          EXPO_NO_TELEMETRY: "1"
+      - name: Prebuild Expo Native Code
+        run: npx expo prebuild --platform android
 
-      - name: Upload Artifact
+      - name: Make Gradle Executable
+        run: chmod +x android/gradlew
+
+      - name: Build APK with Gradle
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: App-Build
-          path: '*.apk'
+          name: App-Release-APK
+          path: android/app/build/outputs/apk/release/*.apk
