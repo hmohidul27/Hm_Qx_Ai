@@ -12,19 +12,18 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
 
-      - name: Install EAS CLI
-        run: npm install -g eas-cli
-
-      - name: Build Local APK
+      - name: Build with EAS
         run: npx eas-cli build --platform android --profile preview --non-interactive --local
+        env:
+          EXPO_NO_TELEMETRY: "1"
 
-      - name: Upload APK
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: App-APK
+          name: App-Build
           path: '*.apk'
