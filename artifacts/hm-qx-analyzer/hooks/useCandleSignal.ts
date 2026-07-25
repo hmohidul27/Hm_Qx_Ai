@@ -10,7 +10,6 @@ interface Props {
   autoScanEnabled: boolean;
   isAnalyzerVisible: boolean;
   priceHandlerRef: React.MutableRefObject<((price: number) => void) | null>;
-  fireScanTrigger: () => void;
 }
 
 export function useCandleSignal({
@@ -21,7 +20,6 @@ export function useCandleSignal({
   autoScanEnabled,
   isAnalyzerVisible,
   priceHandlerRef,
-  fireScanTrigger,
 }: Props) {
   const tickDataRef = useRef<number[]>([]);
   const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -30,36 +28,34 @@ export function useCandleSignal({
   isScanningRef.current = isScanning;
 
   const generateSignal = useCallback(() => {
-    // Unregister price listener
+    // Stop collecting prices
     priceHandlerRef.current = null;
 
     const ticks = tickDataRef.current;
 
     if (ticks.length < 2) {
-      // Not enough data from page — show error and reset
-      setScanStatus('NO CHART PRICE DETECTED — OPEN A CHART FIRST');
+      setScanStatus('NO PRICE DATA — OPEN A CHART AND TRY AGAIN');
       setIsScanning(false);
-      setTimeout(() => setScanStatus('SYSTEM READY'), 3000);
+      setTimeout(() => setScanStatus('SYSTEM READY'), 3500);
       return;
     }
 
-    // Signal logic:
-    // "Hold point" = price at the START of the scan window (where it was holding)
-    // "Close" = last price captured before candle close
+    // Core logic:
+    // holdPrice = price at scan start (where it was holding)
+    // closePrice = last price when candle closes
     const holdPrice = ticks[0];
     const closePrice = ticks[ticks.length - 1];
-
     const priceDiff = closePrice - holdPrice;
     const isUp = priceDiff >= 0;
 
-    // Strength based on actual price movement magnitude
-    const pipDiff = Math.abs(priceDiff) * 10000; // pips (4 decimal currencies)
-    let strength = Math.min(97, pipDiff * 35);
-    if (strength < 42) strength = 42 + Math.random() * 20;
+    // Strength in pips (4-decimal pairs)
+    const pipDiff = Math.abs(priceDiff) * 10000;
+    let strength = Math.min(97, pipDiff * 40);
+    if (strength < 44) strength = 44 + Math.random() * 22;
 
     const label = isUp
-      ? pipDiff > 3 ? 'STRONG BUY' : 'BUY'
-      : pipDiff > 3 ? 'STRONG SELL' : 'SELL';
+      ? pipDiff > 2.5 ? 'STRONG BUY' : 'BUY'
+      : pipDiff > 2.5 ? 'STRONG SELL' : 'SELL';
 
     const signal: Signal = {
       direction: isUp ? 'UP' : 'DOWN',
@@ -70,14 +66,13 @@ export function useCandleSignal({
     };
 
     setSignal(signal);
-    setScanStatus('AI SIGNAL GENERATED SUCCESSFULLY!');
+    setScanStatus('AI SIGNAL GENERATED!');
     setIsScanning(false);
 
     // Voice announcement in Bengali
     const voiceText = isUp
-      ? `আপ সিগনাল! বাই করুন! মার্কেট ঊর্ধ্বমুখী।`
-      : `ডাউন সিগনাল! সেল করুন! মার্কেট নিম্নমুখী।`;
-
+      ? 'আপ সিগনাল! বাই করুন! মার্কেট ঊর্ধ্বমুখী।'
+      : 'ডাউন সিগনাল! সেল করুন! মার্কেট নিম্নমুখী।';
     Speech.speak(voiceText, { language: 'bn-BD', rate: 0.85, pitch: 1.1 });
 
     setTimeout(() => {
@@ -92,22 +87,20 @@ export function useCandleSignal({
 
       tickDataRef.current = [];
       setIsScanning(true);
-      setScanStatus('INJECTING SCANNER INTO CHART...');
-
-      // Register price listener — prices come from the open chart page
-      priceHandlerRef.current = (price: number) => {
-        tickDataRef.current.push(price);
-        const countdown = durationSeconds - Math.round(tickDataRef.current.length * (durationSeconds / 10));
-        const countDisplay = Math.max(0, countdown);
-        setScanStatus(
-          `READING CHART LIVE: ${countDisplay}s | PRICE: ${price.toFixed(5)}`
-        );
-      };
-
-      // Tell BrowserView to inject the JS extractor now
-      fireScanTrigger();
+      setScanStatus('READING CHART LIVE...');
 
       let countdown = durationSeconds;
+      let lastDisplayedPrice = 0;
+
+      // Register price listener — prices come from the open chart via BrowserView
+      priceHandlerRef.current = (price: number) => {
+        tickDataRef.current.push(price);
+        if (price !== lastDisplayedPrice) {
+          lastDisplayedPrice = price;
+          setScanStatus(`READING CHART: ${countdown}s LEFT | ${price.toFixed(5)}`);
+        }
+      };
+
       scanTimerRef.current = setInterval(() => {
         countdown--;
         if (countdown <= 0) {
@@ -117,30 +110,24 @@ export function useCandleSignal({
         }
       }, 1000);
     },
-    [setIsScanning, setScanStatus, priceHandlerRef, fireScanTrigger, generateSignal]
+    [setIsScanning, setScanStatus, priceHandlerRef, generateSignal]
   );
 
-  // Auto-scan: detect last 10 seconds of each 1-minute candle (second 50)
+  // Auto-scan: last 10 seconds of every 1-minute candle (second = 50)
   useEffect(() => {
     if (!autoScanEnabled || !isAnalyzerVisible) return;
-
-    const autoInterval = setInterval(() => {
+    const id = setInterval(() => {
       const sec = new Date().getSeconds();
-
       if (sec === 50 && !isScanningRef.current && !autoTriggerRef.current) {
         autoTriggerRef.current = true;
-        setScanStatus('AUTO SCAN: LAST 10s OF CANDLE — READING CHART...');
+        setScanStatus('AUTO: LAST 10s OF CANDLE — READING CHART...');
         startScan(9);
       }
-      if (sec === 1) {
-        autoTriggerRef.current = false;
-      }
+      if (sec === 1) autoTriggerRef.current = false;
     }, 500);
-
-    return () => clearInterval(autoInterval);
+    return () => clearInterval(id);
   }, [autoScanEnabled, isAnalyzerVisible, startScan, setScanStatus]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       priceHandlerRef.current = null;
