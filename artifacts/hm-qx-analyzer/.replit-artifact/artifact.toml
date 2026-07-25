@@ -1,0 +1,23 @@
+kind = "mobile"
+previewPath = "/"
+title = "HM QX Analyzer"
+version = "1.0.0"
+id = "artifacts/hm-qx-analyzer"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/" ]
+localPort = 21675
+
+[services.development]
+run = "pnpm --filter @workspace/hm-qx-analyzer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/hm-qx-analyzer", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/hm-qx-analyzer", "run", "serve" ]
+
+[services.env]
+PORT = "21675"
+BASE_PATH = "/"
