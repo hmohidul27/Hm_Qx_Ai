@@ -2,55 +2,46 @@ import { useEffect, useRef, useCallback } from 'react';
 import * as Speech from 'expo-speech';
 import { Signal } from '@/context/AppContext';
 
-// ─── DOM price scanner — injected into WebView every 600ms during scan ────
-// Tries many selectors and text patterns specific to Quotex, Binolla, etc.
+// Injected on-demand during scan — broad DOM scan as supplementary fallback
 const DOM_SCAN_JS = `
 (function() {
   function post(p) {
-    p = parseFloat(p);
-    if (!isNaN(p) && p > 0 && p < 1000000) {
-      try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'price',value:p})); } catch(e){}
-    }
+    p = parseFloat(String(p).replace(/,/g,'.'));
+    if (isNaN(p) || p <= 0 || p > 9999999) return;
+    try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'price',value:p})); } catch(e){}
   }
-
-  // 1. Targeted selectors (Quotex, Binolla, generic trading)
   var sels = [
-    '.chart-price', '[class*="chart-price"]',
-    '.current-price', '[class*="current-price"]', '[class*="currentPrice"]',
-    '.asset-price',  '[class*="asset-price"]',  '[class*="assetPrice"]',
-    '.js-price', '.js-rate', '.trade-price',
-    '[class*="price-value"]', '[class*="priceValue"]',
-    '[class*="rate-value"]',  '[class*="rateValue"]',
-    '.value', '.price', '.rate',
-    '[data-field="last_price"]', '[data-role="price"]',
+    '.current-price','[class*="current-price"]','[class*="currentPrice"]',
+    '.asset-price','[class*="asset-price"]','[class*="assetPrice"]',
+    '.js-price','.js-rate','.trade-price','.deal-price',
+    '[class*="price-value"]','[class*="priceValue"]',
+    '[class*="rate-value"]','[class*="rateValue"]',
+    '.value','.price','.rate',
+    '[data-field="last_price"]','[data-role="price"]',
     '.tv-symbol-price-quote__value',
-    '.deal-price', '[class*="dealPrice"]',
-    '.current__value', '.ticker__price',
-    'span[class*="price"]', 'div[class*="price"]',
-    'span[class*="rate"]',  'div[class*="rate"]'
+    'span[class*="price"]','div[class*="price"]',
+    'span[class*="rate"]','div[class*="rate"]'
   ];
-
-  for (var i = 0; i < sels.length; i++) {
-    var els = document.querySelectorAll(sels[i]);
-    for (var j = 0; j < els.length; j++) {
-      var el = els[j];
-      if (el.offsetParent !== null) {
-        var txt = (el.textContent || '').replace(/,/g, '.').trim();
-        var m = txt.match(/([0-9]{1,7}\\.[0-9]{2,8})/);
-        if (m) { post(m[1]); return; }
+  for (var i=0;i<sels.length;i++){
+    var els=document.querySelectorAll(sels[i]);
+    for(var j=0;j<els.length;j++){
+      var el=els[j];
+      if(el.offsetParent!==null){
+        var txt=(el.textContent||'').replace(/,/g,'.').trim();
+        var m=txt.match(/([0-9]{1,7}\\.[0-9]{2,6})/);
+        if(m){post(m[1]);return;}
       }
     }
   }
-
-  // 2. Fallback: scan all leaf elements for price-shaped numbers
-  var all = document.querySelectorAll('span, div, p, td, li, label');
-  for (var k = 0; k < all.length; k++) {
-    var el = all[k];
-    if (el.children.length === 0 && el.offsetParent !== null) {
-      var t = (el.textContent || '').replace(/,/g, '.').trim();
-      if (t.length >= 4 && t.length <= 14) {
-        var match = t.match(/^([0-9]{1,7}\\.[0-9]{2,8})$/);
-        if (match) { post(match[1]); return; }
+  // Leaf element fallback
+  var all=document.querySelectorAll('span,div,p,td,li,label');
+  for(var k=0;k<all.length;k++){
+    var el=all[k];
+    if(el.children.length===0&&el.offsetParent!==null){
+      var t=(el.textContent||'').replace(/,/g,'.').trim();
+      if(t.length>=4&&t.length<=14){
+        var match=t.match(/^([0-9]{1,7}\\.[0-9]{2,6})$/);
+        if(match){post(match[1]);return;}
       }
     }
   }
@@ -79,11 +70,11 @@ export function useCandleSignal({
   priceHandlerRef,
   webViewRef,
 }: Props) {
-  const tickDataRef = useRef<number[]>([]);
-  const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const domPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickDataRef   = useRef<number[]>([]);
+  const scanTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const domPollRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoTriggerRef = useRef(false);
-  const isScanningRef = useRef(isScanning);
+  const isScanningRef  = useRef(isScanning);
   isScanningRef.current = isScanning;
 
   const generateSignal = useCallback(() => {
@@ -93,9 +84,10 @@ export function useCandleSignal({
     const ticks = tickDataRef.current;
 
     if (ticks.length < 2) {
-      setScanStatus('NO PRICE DATA — RELOAD THE PAGE AND TRY AGAIN');
+      // Not enough data — give a helpful message
+      setScanStatus('NO PRICE DATA — RELOAD THE CHART PAGE AND TRY AGAIN');
       setIsScanning(false);
-      setTimeout(() => setScanStatus('SYSTEM READY'), 4000);
+      setTimeout(() => setScanStatus('SYSTEM READY'), 5000);
       return;
     }
 
@@ -103,14 +95,17 @@ export function useCandleSignal({
     const closePrice = ticks[ticks.length - 1];
     const priceDiff  = closePrice - holdPrice;
     const isUp       = priceDiff >= 0;
-    const pipDiff    = Math.abs(priceDiff) * 10000;
+
+    // Use 10000 for forex (4-decimal), 1 for index-like (USD/IDR range 17000+)
+    const multiplier = holdPrice > 100 ? 1 : 10000;
+    const pipDiff    = Math.abs(priceDiff) * multiplier;
 
     let strength = Math.min(97, pipDiff * 40);
     if (strength < 44) strength = 44 + Math.random() * 22;
 
     const label = isUp
-      ? (pipDiff > 2.5 ? 'STRONG BUY' : 'BUY')
-      : (pipDiff > 2.5 ? 'STRONG SELL' : 'SELL');
+      ? (pipDiff > 3 ? 'STRONG BUY' : 'BUY')
+      : (pipDiff > 3 ? 'STRONG SELL' : 'SELL');
 
     const signal: Signal = {
       direction: isUp ? 'UP' : 'DOWN',
@@ -141,26 +136,26 @@ export function useCandleSignal({
 
       tickDataRef.current = [];
       setIsScanning(true);
-      setScanStatus('SCANNING CHART...');
+      setScanStatus('CONNECTING TO CHART...');
 
       let countdown = durationSeconds;
       let lastPrice = 0;
 
-      // Register handler — prices from WebSocket interception arrive here
+      // Register handler — prices from canvas interception + WebSocket arrive here
       priceHandlerRef.current = (price: number) => {
         tickDataRef.current.push(price);
         if (price !== lastPrice) {
           lastPrice = price;
-          setScanStatus(`READING: ${countdown}s | ${price.toFixed(5)}`);
+          setScanStatus(`READING: ${countdown}s | ${price.toFixed(price > 100 ? 2 : 5)}`);
         }
       };
 
-      // DOM poll — inject scanner every 600ms regardless of WebSocket
+      // DOM poll as additional fallback (in case canvas hook or WS aren't sending)
       domPollRef.current = setInterval(() => {
         try { webViewRef.current?.injectJavaScript(DOM_SCAN_JS); } catch (_) {}
-      }, 600);
+      }, 700);
 
-      // Countdown timer
+      // Countdown
       scanTimerRef.current = setInterval(() => {
         countdown--;
         if (countdown <= 0) {

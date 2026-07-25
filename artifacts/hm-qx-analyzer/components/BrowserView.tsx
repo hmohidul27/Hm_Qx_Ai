@@ -11,50 +11,120 @@ import { Ionicons } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
 
-// ─── Injected BEFORE page content loads ───────────────────────────────────
-// Hooks WebSocket so live price ticks are captured from the very first frame.
+// ─── Injected BEFORE page JS runs ─────────────────────────────────────────
+// Hooks canvas fillText (catches all numbers drawn on the chart canvas),
+// WebSocket messages, and XHR/fetch responses.
 const PRELOAD_JS = `
 (function() {
-  if (window.__hmqxWS) return true;
-  window.__hmqxWS = true;
+  if (window.__hmqx) return true;
+  window.__hmqx = true;
+
+  var _lastSent = 0;
+  var _throttleMs = 300;
 
   function postPrice(p) {
-    p = parseFloat(p);
-    if (isNaN(p) || p <= 0 || p > 1000000) return;
-    try { window.ReactNativeWebView.postMessage(JSON.stringify({type:'price',value:p})); } catch(e){}
-  }
-
-  function tryExtract(raw) {
-    if (!raw || typeof raw !== 'string') return;
-    // Socket.io wrapped JSON: 42["event",{...}]
-    var sio = raw.match(/^\\d+\\[".+?",({.+})\\]$/);
-    if (sio) { raw = sio[1]; }
+    p = parseFloat(String(p).replace(/,/g, '.'));
+    if (isNaN(p) || p <= 0 || p > 9999999) return;
+    // throttle: don't flood RN bridge
+    var now = Date.now();
+    if (now - _lastSent < _throttleMs) return;
+    _lastSent = now;
     try {
-      var d = JSON.parse(raw);
-      var keys = ['price','close','bid','ask','c','last','rate','ltp','currentPrice','current_price','close_price'];
-      for (var i=0;i<keys.length;i++){
-        if (d[keys[i]] !== undefined) { postPrice(d[keys[i]]); return; }
-      }
-      // nested: {data:{price:...}}
-      if (d.data) for (var i=0;i<keys.length;i++){
-        if (d.data[keys[i]] !== undefined) { postPrice(d.data[keys[i]]); return; }
-      }
-    } catch(e) {}
-    // Plain regex fallback
-    var m = raw.match(/"(?:price|close|bid|ask|c|last|rate|ltp)":\\s*"?([0-9]+\\.?[0-9]+)"?/i);
-    if (m) postPrice(m[1]);
+      window.ReactNativeWebView.postMessage(
+        JSON.stringify({ type: 'price', value: p })
+      );
+    } catch (e) {}
   }
 
-  // WebSocket hook
+  // ── 1. Canvas fillText / strokeText interception ─────────────────────
+  // Quotex and most brokers draw prices on a <canvas> using fillText.
+  // We hook getContext so every canvas created after this gets intercepted.
+  var _origGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function () {
+    var ctx = _origGetContext.apply(this, arguments);
+    if (ctx && !ctx.__hmqx && (arguments[0] === '2d' || arguments[0] === '2D')) {
+      ctx.__hmqx = true;
+
+      var _fillText   = ctx.fillText.bind(ctx);
+      var _strokeText = ctx.strokeText ? ctx.strokeText.bind(ctx) : null;
+
+      function interceptText(text) {
+        // Match numbers like 1590.61, 17943.11, 1.08450
+        var t = String(text).replace(/,/g, '.').trim();
+        if (/^[0-9]{1,7}\\.[0-9]{2,6}$/.test(t)) {
+          postPrice(t);
+        }
+      }
+
+      ctx.fillText = function () {
+        interceptText(arguments[0]);
+        return _fillText.apply(ctx, arguments);
+      };
+      if (_strokeText) {
+        ctx.strokeText = function () {
+          interceptText(arguments[0]);
+          return _strokeText.apply(ctx, arguments);
+        };
+      }
+    }
+    return ctx;
+  };
+
+  // ── 2. WebSocket interception ────────────────────────────────────────
   var _WS = window.WebSocket;
-  window.WebSocket = function(url, proto) {
+  window.WebSocket = function (url, proto) {
     var ws = proto ? new _WS(url, proto) : new _WS(url);
-    ws.addEventListener('message', function(e) {
-      if (typeof e.data === 'string') tryExtract(e.data);
+    ws.addEventListener('message', function (e) {
+      if (typeof e.data !== 'string') return;
+      var raw = e.data;
+      // Socket.io: 42["event",{...}]
+      var sio = raw.match(/^\\d+\\["[^"]*",({.+})\\]$/);
+      if (sio) raw = sio[1];
+      try {
+        var d = JSON.parse(raw);
+        var keys = ['price','close','bid','ask','c','last','rate','ltp',
+                    'currentPrice','current_price','close_price','closePrice'];
+        function dig(obj) {
+          if (!obj || typeof obj !== 'object') return;
+          for (var i = 0; i < keys.length; i++) {
+            var v = obj[keys[i]];
+            if (typeof v === 'number' && v > 0) { postPrice(v); return; }
+            if (typeof v === 'string' && v.length) { postPrice(v); return; }
+          }
+          var vals = Object.values(obj);
+          for (var j = 0; j < vals.length; j++) {
+            if (vals[j] && typeof vals[j] === 'object') dig(vals[j]);
+          }
+        }
+        dig(d);
+      } catch (ex) {
+        var m = raw.match(/"(?:price|close|bid|ask|c|last|rate|ltp)":\\s*"?([0-9]+\\.?[0-9]+)"?/i);
+        if (m) postPrice(m[1]);
+      }
     });
     return ws;
   };
-  try { window.WebSocket.prototype = _WS.prototype; } catch(e) {}
+  try { window.WebSocket.prototype = _WS.prototype; } catch (e) {}
+
+  // ── 3. XHR interception ──────────────────────────────────────────────
+  var _open = XMLHttpRequest.prototype.open;
+  var _send = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function () {
+    this.__hmqxUrl = arguments[1];
+    return _open.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    this.addEventListener('load', function () {
+      try {
+        var d = JSON.parse(this.responseText);
+        var keys2 = ['price','close','bid','ask','c','last','rate','ltp'];
+        for (var i = 0; i < keys2.length; i++) {
+          if (typeof d[keys2[i]] === 'number') { postPrice(d[keys2[i]]); return; }
+        }
+      } catch (e) {}
+    });
+    return _send.apply(this, arguments);
+  };
 
   true;
 })();
@@ -76,7 +146,6 @@ const HOME_SITES = [
   { label: 'Binolla', url: 'https://binolla.com', color: '#ffaa00', icon: 'logo-bitcoin' as const },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────
 export default function BrowserView() {
   const colors = useColors();
   const { setCurrentUrl, setView, reportPrice, webViewRef } = useApp();
@@ -92,7 +161,7 @@ export default function BrowserView() {
           reportPrice(msg.value);
         }
       } catch {
-        // ignore non-JSON messages
+        // ignore non-JSON messages from the page
       }
     },
     [reportPrice]
@@ -118,7 +187,6 @@ export default function BrowserView() {
 
   return (
     <View style={styles.container}>
-      {/* Browser bar */}
       <View style={[styles.browserBar, { backgroundColor: '#0c0613', borderBottomColor: colors.border }]}>
         <TouchableOpacity style={[styles.ctrlBtn, { borderColor: colors.border }]} onPress={goHome}>
           <Ionicons name="home-outline" size={15} color={colors.primary} />
@@ -150,7 +218,6 @@ export default function BrowserView() {
         </View>
       </View>
 
-      {/* Viewport */}
       <View style={styles.viewport}>
         {showWebView ? (
           <WebView
@@ -161,6 +228,7 @@ export default function BrowserView() {
             domStorageEnabled
             allowsInlineMediaPlayback
             mediaPlaybackRequiresUserAction={false}
+            // Canvas + WebSocket + XHR hooks — run before page JS
             injectedJavaScriptBeforeContentLoaded={PRELOAD_JS}
             onMessage={handleMessage}
             onNavigationStateChange={(state) => {
@@ -178,7 +246,6 @@ export default function BrowserView() {
   );
 }
 
-// ─── Home screen ──────────────────────────────────────────────────────────
 function HomeScreen({ onLoadUrl, colors }: { onLoadUrl: (url: string) => void; colors: ReturnType<typeof useColors> }) {
   return (
     <View style={[homeStyles.container, { backgroundColor: '#070e14' }]}>
